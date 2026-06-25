@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>gesture_arm</name>
+  <version>0.0.1</version>
+  <description>Gesture-Controlled Virtual Robotic Arm — Orangewood Training Project</description>
+  <maintainer email="aadicolumban@gmail.com">Aaditya Sabharwal</maintainer>
+  <license>MIT</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>rviz2</depend>
+  <depend>ur_description</depend>
+  <depend>xacro</depend>
+
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
