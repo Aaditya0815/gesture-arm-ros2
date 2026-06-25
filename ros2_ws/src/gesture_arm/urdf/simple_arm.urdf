@@ -1,0 +1,83 @@
+<?xml version="1.0"?>
+<robot name="gesture_arm">
+
+  <!-- ==================== BASE ==================== -->
+  <link name="base_link">
+    <visual>
+      <geometry><cylinder radius="0.05" length="0.02"/></geometry>
+      <material name="grey"><color rgba="0.5 0.5 0.5 1"/></material>
+    </visual>
+  </link>
+
+  <!-- JOINT 1: Base rotation (Z axis — yaw) -->
+  <joint name="base_rotate" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.01"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="10" velocity="1"/>
+  </joint>
+
+  <!-- ==================== LINK 1: Lower arm ==================== -->
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.1"/>
+      <geometry><cylinder radius="0.02" length="0.2"/></geometry>
+      <material name="blue"><color rgba="0.2 0.4 0.8 1"/></material>
+    </visual>
+  </link>
+
+  <!-- JOINT 2: Shoulder (Y axis — pitch) -->
+  <joint name="shoulder" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10" velocity="1"/>
+  </joint>
+
+  <!-- ==================== LINK 2: Upper arm ==================== -->
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0.1"/>
+      <geometry><cylinder radius="0.018" length="0.2"/></geometry>
+      <material name="green"><color rgba="0.2 0.7 0.3 1"/></material>
+    </visual>
+  </link>
+
+  <!-- JOINT 3: Elbow (Y axis — pitch) -->
+  <joint name="elbow" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.2"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.57" upper="1.57" effort="10" velocity="1"/>
+  </joint>
+
+  <!-- ==================== LINK 3: Forearm ==================== -->
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 0.08"/>
+      <geometry><cylinder radius="0.015" length="0.16"/></geometry>
+      <material name="orange"><color rgba="0.9 0.5 0.1 1"/></material>
+    </visual>
+  </link>
+
+  <!-- JOINT 4: Gripper (prismatic — linear slide) -->
+  <joint name="gripper" type="prismatic">
+    <parent link="link3"/>
+    <child link="gripper_link"/>
+    <origin xyz="0 0 0.16"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="0.0" upper="0.05" effort="5" velocity="0.5"/>
+  </joint>
+
+  <!-- ==================== GRIPPER LINK ==================== -->
+  <link name="gripper_link">
+    <visual>
+      <geometry><box size="0.06 0.01 0.02"/></geometry>
+      <material name="red"><color rgba="0.8 0.1 0.1 1"/></material>
+    </visual>
+  </link>
+
+</robot>
