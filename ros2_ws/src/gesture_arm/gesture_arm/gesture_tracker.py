@@ -39,6 +39,18 @@ GRIPPER_ALPHA = 0.30
 # This ratio is scale-invariant — works at any camera distance.
 FIST_RATIO_THRESHOLD = 0.35
 
+# ── v14: Hysteresis mode switching thresholds ──
+# Entry: wrist must be clearly above shoulder to enter TELEOP
+# Exit:  wrist must drop significantly below shoulder to leave TELEOP
+# This prevents accidental mode switches when lowering elbow during control.
+TELEOP_ENTER_THRESH = 0.10   # wrist must be this far ABOVE shoulder to enter
+TELEOP_EXIT_THRESH  = 0.15   # wrist must be this far BELOW shoulder to exit
+STOP_ENTER_THRESH   = 0.10   # left wrist above left shoulder to trigger STOP
+MODE_BUFFER_SIZE    = 20     # frames of mode history (was 15)
+TELEOP_CONSENSUS    = 12     # frames needed to ENTER teleop (was 8)
+AUTO_CONSENSUS      = 15     # frames needed to EXIT to auto (was 10) — harder to leave
+STOP_CONSENSUS      = 8      # frames needed for emergency stop — fast
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Fist Detection (Scale-Invariant)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -146,10 +158,10 @@ def main():
 
     # States
     spatial_pos = np.array([0.0, 0.0, 0.0]) # [user_x, user_y, user_z]
-    # torso_yaw removed in v13 — delta Cartesian control handles j1 via IK
     gripper = 1.0
-    mode_buffer = deque(maxlen=15)
+    mode_buffer = deque(maxlen=MODE_BUFFER_SIZE)
     active_mode = "AUTO"
+    mode_locked = False  # v14: hysteresis lock prevents accidental exits
     prev_time = time.time()
     fps = 0.0
     fist_ratio = 1.0    # For HUD display
@@ -185,22 +197,42 @@ def main():
             l_shoulder = img_lm[11]
             l_wrist = img_lm[15]
             
-            # v13: l_shoulder_w retained for possible future use
             r_shoulder_w = world[12]
             r_wrist_w    = world[16]
 
-            # Mode detection
-            if r_wrist.y < r_shoulder.y - 0.05:
-                raw_mode = "TELEOP"
-            elif l_wrist.y < l_shoulder.y - 0.05:
+            # ── v14: Hysteresis mode detection ──
+            # STOP always has priority (safety)
+            if l_wrist.y < l_shoulder.y - STOP_ENTER_THRESH:
                 raw_mode = "STOP"
+            elif active_mode == "TELEOP" and mode_locked:
+                # LOCKED in TELEOP: stay unless wrist drops WELL below shoulder
+                if r_wrist.y > r_shoulder.y + TELEOP_EXIT_THRESH:
+                    raw_mode = "AUTO"   # deliberate exit gesture
+                else:
+                    raw_mode = "TELEOP"  # stay locked — safe zone
             else:
-                raw_mode = "AUTO"
+                # Not locked: use entry threshold
+                if r_wrist.y < r_shoulder.y - TELEOP_ENTER_THRESH:
+                    raw_mode = "TELEOP"
+                else:
+                    raw_mode = "AUTO"
 
             mode_buffer.append(raw_mode)
-            if mode_buffer.count("STOP") >= 8: active_mode = "STOP"
-            elif mode_buffer.count("TELEOP") >= 8: active_mode = "TELEOP"
-            elif mode_buffer.count("AUTO") >= 10: active_mode = "AUTO"
+
+            # Consensus with different thresholds per mode
+            stop_count   = mode_buffer.count("STOP")
+            teleop_count = mode_buffer.count("TELEOP")
+            auto_count   = mode_buffer.count("AUTO")
+
+            if stop_count >= STOP_CONSENSUS:
+                active_mode = "STOP"
+                mode_locked = False
+            elif teleop_count >= TELEOP_CONSENSUS:
+                active_mode = "TELEOP"
+                mode_locked = True   # Lock in!
+            elif auto_count >= AUTO_CONSENSUS:
+                active_mode = "AUTO"
+                mode_locked = False
 
             if active_mode == "TELEOP":
                 # True 3D Spatial Vector in meters (Right, Up, Forward)
@@ -263,7 +295,10 @@ def main():
         cv2.rectangle(display, (0, 0), (w_img, 60), (0, 0, 0), -1)
 
         mode_cols = {"AUTO": (0,200,0), "TELEOP": (0,165,255), "STOP": (0,0,255)}
-        cv2.putText(display, f"MODE: {active_mode}", (10, 35),
+        mode_label = f"MODE: {active_mode}"
+        if mode_locked and active_mode == "TELEOP":
+            mode_label += " [LOCKED]"
+        cv2.putText(display, mode_label, (10, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, mode_cols.get(active_mode, (255,255,255)), 2)
         cv2.putText(display, f"FPS: {fps:.0f}", (w_img - 140, 35),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
