@@ -87,10 +87,10 @@ class PoseFilter:
         self.fz  = OneEuroFilter(freq, min_cutoff=0.8, beta=0.15)
         # Lateral (left/right sweep): smooth — low beta kills jitter
         self.fx_lat = OneEuroFilter(freq, min_cutoff=0.35, beta=0.05)
-        # Wrist orientation: moderate smoothing
-        self.fr  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
-        self.fp  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
-        self.fyw = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
+        # v15: Wrist orientation — smoother (lower beta kills jitter, higher cutoff keeps response)
+        self.fr  = OneEuroFilter(freq, min_cutoff=0.6, beta=0.06)
+        self.fp  = OneEuroFilter(freq, min_cutoff=0.6, beta=0.06)
+        self.fyw = OneEuroFilter(freq, min_cutoff=0.6, beta=0.06)
         # Torso yaw: very smooth
         self.ft  = OneEuroFilter(freq, min_cutoff=0.3, beta=0.03)
 
@@ -726,29 +726,55 @@ class JointBridgeNode(Node):
         stamp = self.get_clock().now().to_msg()
         mid   = 0
 
-        # Floor
+        # v15: Premium floor — soft dark grid
         f = self._mk('env', mid, Marker.CUBE, stamp); mid += 1
         f.pose.position.x = -0.25
         f.pose.position.y = -0.35
-        f.pose.position.z = -0.005
-        f.scale.x, f.scale.y, f.scale.z = 1.6, 1.6, 0.01
-        f.color.r, f.color.g, f.color.b, f.color.a = 0.15, 0.15, 0.18, 0.60
+        f.pose.position.z = -0.008
+        f.scale.x, f.scale.y, f.scale.z = 2.0, 2.0, 0.006
+        f.color.r, f.color.g, f.color.b, f.color.a = 0.12, 0.13, 0.16, 0.70
         ma.markers.append(f)
 
-        # Table
+        # v15: Grid lines on floor (subtle)
+        for gi in range(-4, 5):
+            gl = self._mk('grid', mid, Marker.CUBE, stamp); mid += 1
+            gl.pose.position.x = -0.25
+            gl.pose.position.y = -0.35 + gi * 0.20
+            gl.pose.position.z = -0.004
+            gl.scale.x, gl.scale.y, gl.scale.z = 2.0, 0.003, 0.001
+            gl.color.r, gl.color.g, gl.color.b, gl.color.a = 0.25, 0.28, 0.32, 0.30
+            ma.markers.append(gl)
+            gl2 = self._mk('grid', mid, Marker.CUBE, stamp); mid += 1
+            gl2.pose.position.x = -0.25 + gi * 0.20
+            gl2.pose.position.y = -0.35
+            gl2.pose.position.z = -0.004
+            gl2.scale.x, gl2.scale.y, gl2.scale.z = 0.003, 2.0, 0.001
+            gl2.color.r, gl2.color.g, gl2.color.b, gl2.color.a = 0.25, 0.28, 0.32, 0.30
+            ma.markers.append(gl2)
+
+        # v15: Sleek metallic table
         tb = self._mk('env', mid, Marker.CUBE, stamp); mid += 1
         tb.pose.position.x = -0.47
         tb.pose.position.y = -0.36
         tb.pose.position.z = -0.015
-        tb.scale.x, tb.scale.y, tb.scale.z = 0.65, 0.80, 0.03
-        tb.color.r, tb.color.g, tb.color.b, tb.color.a = 0.55, 0.35, 0.18, 0.95
+        tb.scale.x, tb.scale.y, tb.scale.z = 0.70, 0.85, 0.025
+        tb.color.r, tb.color.g, tb.color.b, tb.color.a = 0.30, 0.32, 0.35, 0.95
         ma.markers.append(tb)
+        # Table edge highlight
+        te = self._mk('env', mid, Marker.CUBE, stamp); mid += 1
+        te.pose.position.x = -0.47
+        te.pose.position.y = -0.36
+        te.pose.position.z = -0.002
+        te.scale.x, te.scale.y, te.scale.z = 0.71, 0.86, 0.003
+        te.color.r, te.color.g, te.color.b, te.color.a = 0.45, 0.50, 0.55, 0.60
+        ma.markers.append(te)
 
         # Drop Box (floor + 4 walls)
         bx, by, bz = BOX_POS
         w, d, h, t = BOX_W, BOX_D, BOX_H, BOX_WALL_T
-        bc = (0.95, 0.55, 0.10)
-        ba = 0.50
+        # v15: Sleek teal box
+        bc = (0.15, 0.70, 0.75)
+        ba = 0.55
 
         def box_panel(x, y, z, sx, sy, sz, alpha=ba):
             nonlocal mid
@@ -819,21 +845,52 @@ class JointBridgeNode(Node):
 
             ma.markers.append(cl)
 
-        # EE gripper sphere
-        gs_val = 0.03 + 0.025 * max(0.0, min(1.0, float(self.gripper)))
-        if math.isnan(gs_val):
-            gs_val = 0.05
-        gr = self._mk('gripper', 0, Marker.SPHERE, stamp)
-        gr.pose.position.x = self.ee_pos[0]
-        gr.pose.position.y = self.ee_pos[1]
-        gr.pose.position.z = self.ee_pos[2]
-        gr.scale.x = gr.scale.y = gr.scale.z = gs_val
-        if self.gripper < 0.5:
-            gr.color.r, gr.color.g, gr.color.b = 1.0, 0.15, 0.15
-        else:
-            gr.color.r, gr.color.g, gr.color.b = 0.15, 1.0, 0.30
-        gr.color.a = 0.85
-        ma.markers.append(gr)
+        # v15: Two-finger gripper visualization
+        grip_val = max(0.0, min(1.0, float(self.gripper)))
+        if math.isnan(grip_val): grip_val = 1.0
+        finger_spread = 0.01 + grip_val * 0.025  # fingers spread apart when open
+        finger_color = (1.0, 0.15, 0.15) if grip_val < 0.5 else (0.15, 1.0, 0.30)
+
+        # Gripper base (small cylinder at wrist)
+        gb = self._mk('gripper', 0, Marker.CYLINDER, stamp)
+        gb.pose.position.x = self.ee_pos[0]
+        gb.pose.position.y = self.ee_pos[1]
+        gb.pose.position.z = self.ee_pos[2] + 0.015
+        gb.scale.x = gb.scale.y = 0.025
+        gb.scale.z = 0.02
+        gb.color.r, gb.color.g, gb.color.b = 0.4, 0.42, 0.45
+        gb.color.a = 0.9
+        ma.markers.append(gb)
+
+        # Left finger
+        lf = self._mk('gripper', 1, Marker.CUBE, stamp)
+        lf.pose.position.x = self.ee_pos[0]
+        lf.pose.position.y = self.ee_pos[1] - finger_spread
+        lf.pose.position.z = self.ee_pos[2] - 0.01
+        lf.scale.x, lf.scale.y, lf.scale.z = 0.008, 0.005, 0.035
+        lf.color.r, lf.color.g, lf.color.b = finger_color
+        lf.color.a = 0.90
+        ma.markers.append(lf)
+
+        # Right finger
+        rf = self._mk('gripper', 2, Marker.CUBE, stamp)
+        rf.pose.position.x = self.ee_pos[0]
+        rf.pose.position.y = self.ee_pos[1] + finger_spread
+        rf.pose.position.z = self.ee_pos[2] - 0.01
+        rf.scale.x, rf.scale.y, rf.scale.z = 0.008, 0.005, 0.035
+        rf.color.r, rf.color.g, rf.color.b = finger_color
+        rf.color.a = 0.90
+        ma.markers.append(rf)
+
+        # Grip status dot (small sphere between fingers)
+        gd = self._mk('gripper', 3, Marker.SPHERE, stamp)
+        gd.pose.position.x = self.ee_pos[0]
+        gd.pose.position.y = self.ee_pos[1]
+        gd.pose.position.z = self.ee_pos[2] - 0.015
+        gd.scale.x = gd.scale.y = gd.scale.z = 0.012
+        gd.color.r, gd.color.g, gd.color.b = finger_color
+        gd.color.a = 0.7
+        ma.markers.append(gd)
 
         # v14: Target ghost sphere — shows where arm is TRYING to go in TELEOP
         if self.mode == 'TELEOP':
