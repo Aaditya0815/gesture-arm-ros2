@@ -87,10 +87,10 @@ class PoseFilter:
         self.fz  = OneEuroFilter(freq, min_cutoff=0.8, beta=0.15)
         # Lateral (left/right sweep): smooth — low beta kills jitter
         self.fx_lat = OneEuroFilter(freq, min_cutoff=0.35, beta=0.05)
-        # v15: Wrist orientation — smoother (lower beta kills jitter, higher cutoff keeps response)
-        self.fr  = OneEuroFilter(freq, min_cutoff=0.6, beta=0.06)
-        self.fp  = OneEuroFilter(freq, min_cutoff=0.6, beta=0.06)
-        self.fyw = OneEuroFilter(freq, min_cutoff=0.6, beta=0.06)
+        # Wrist orientation: responsive with moderate smoothing
+        self.fr  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
+        self.fp  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
+        self.fyw = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
         # Torso yaw: very smooth
         self.ft  = OneEuroFilter(freq, min_cutoff=0.3, beta=0.03)
 
@@ -327,10 +327,12 @@ class JointBridgeNode(Node):
         self._teleop_ref_ee   = None
 
         self.pose_filter  = PoseFilter(freq=30.0)
-        self.joint_interp = JointInterpolator(max_rate_rad_s=4.5, freq=30.0)  # v14: 3.0 -> 4.5 for faster response
+        self.joint_interp = JointInterpolator(max_rate_rad_s=4.5, freq=30.0)
         self.joint_interp.reset(self.joint_positions)
 
-        self._teleop_recal_timer = 0.0   # v14: re-calibration drift timer
+        self._teleop_recal_timer = 0.0
+        self._joint_ema = None          # v16: joint-level EMA for post-IK smoothing
+        self._prev_target = None        # v16: velocity dead zone tracking
 
         self._init_scene()
         self.get_logger().info('Scene ready (right side) | Awaiting tracker...')
@@ -401,6 +403,11 @@ class JointBridgeNode(Node):
                             self.pose_filter.reset()
                             self._teleop_ref_hand = None
                             self._teleop_ref_ee   = None
+                        elif new_mode == 'STOP':
+                            # Freeze at EXACT current position
+                            self._stop_frozen_joints = list(self.joint_positions)
+                            self.joint_interp.reset(self.joint_positions)
+                            self._stop_cube_released = False
 
                     if 'gripper' in msg:
                         g = float(msg['gripper'])
@@ -449,31 +456,37 @@ class JointBridgeNode(Node):
         self._publish_markers()
 
     def _stop_step(self):
-        """v14: Smooth emergency stop — decelerate to zero, drop held cube."""
-        # Freeze joint interpolator at current position (smooth stop)
-        self.joint_interp.set_target(self.joint_positions)
-        self.joint_positions = self.joint_interp.step()
+        """Hold arm at the EXACT position it was when STOP was triggered."""
+        # Lock joint positions to the frozen snapshot
+        if hasattr(self, '_stop_frozen_joints'):
+            self.joint_positions = list(self._stop_frozen_joints)
 
-        # Safety: release any held cube
-        if self.held_cube is not None:
-            cube = self.cubes[self.held_cube]
-            cube['held'] = False
-            self.get_logger().info(f'[E-STOP] Released {cube["label"]}')
-            self.held_cube = None
+        # Safety: release held cube (only once)
+        if not getattr(self, '_stop_cube_released', True):
+            self._stop_cube_released = True
+            if self.held_cube is not None:
+                cube = self.cubes[self.held_cube]
+                cube['held'] = False
+                self.get_logger().info(f'[E-STOP] Released {cube["label"]}')
+                self.held_cube = None
 
         # Slowly open gripper
         self.gripper = min(1.0, self.gripper + 0.05)
 
-        # Clear teleop references so re-entering TELEOP recalibrates
+        # Clear teleop state so re-entering TELEOP recalibrates fresh
         self._teleop_ref_hand = None
         self._teleop_ref_ee   = None
+        self._joint_ema       = None
+        self._prev_target     = None
 
     def _teleop_step(self):
-        SCALE_XZ = 1.8   # v14: 1.5 -> 1.8 for more reach
-        SCALE_Y  = 3.0   # v14: 2.8 -> 3.0 for wider lateral sweep
-        LAT_DEAD = 0.02  # v14: 0.03 -> 0.02 less deadzone = more responsive
-        RECAL_INTERVAL = 5.0  # v14: seconds between re-calibration drifts
-        RECAL_RATE     = 0.02 # v14: how fast reference drifts (0 = never, 1 = instant)
+        SCALE_XZ = 1.8
+        SCALE_Y  = 3.0
+        LAT_DEAD = 0.02
+        RECAL_INTERVAL = 5.0
+        RECAL_RATE     = 0.02
+        VEL_DEAD = 0.003     # velocity dead zone (m) — below this, arm freezes completely
+        JOINT_EMA = 0.35     # joint-level EMA alpha (0=frozen, 1=instant, 0.35=smooth blend)
 
         user_x, user_y, user_z = self.spatial_pos
 
@@ -486,16 +499,17 @@ class JointBridgeNode(Node):
             self._teleop_ref_hand = [fx_lat, fy, fz]
             self._teleop_ref_ee   = list(self.ee_pos)
             self._teleop_recal_timer = 0.0
+            self._prev_target = list(self.ee_pos)
+            self._joint_ema = None
             self.get_logger().info(
                 f'[TELEOP] Calibrated | '
                 f'hand=({fx_lat:.2f},{fy:.2f},{fz:.2f}) '
                 f'EE=({self.ee_pos[0]:.2f},{self.ee_pos[1]:.2f},{self.ee_pos[2]:.2f})')
 
-        # v14: Periodic re-calibration — gently drift reference to reduce accumulated offset
+        # Periodic re-calibration
         self._teleop_recal_timer += 0.033
         if self._teleop_recal_timer >= RECAL_INTERVAL:
             self._teleop_recal_timer = 0.0
-            # Gently move reference toward current hand position
             self._teleop_ref_hand[0] += (fx_lat - self._teleop_ref_hand[0]) * RECAL_RATE
             self._teleop_ref_hand[1] += (fy - self._teleop_ref_hand[1]) * RECAL_RATE
             self._teleop_ref_hand[2] += (fz - self._teleop_ref_hand[2]) * RECAL_RATE
@@ -508,13 +522,23 @@ class JointBridgeNode(Node):
         dz = fz  - self._teleop_ref_hand[2]
 
         ref_x, ref_y, ref_z = self._teleop_ref_ee
-        target_x = max(-0.75, min(-0.08, ref_x - dz * SCALE_XZ))   # v14: wider bounds
+        target_x = max(-0.75, min(-0.08, ref_x - dz * SCALE_XZ))
         target_y = max(-0.78, min( 0.78, ref_y - dx * SCALE_Y))
-        target_z = max( 0.02, min( 0.75, ref_z + dy * SCALE_XZ))   # v14: lower floor
+        target_z = max( 0.02, min( 0.75, ref_z + dy * SCALE_XZ))
 
-        # v14: Snap assist — when gripper is closing near a cube, bias toward it
+        # Fix 1: Velocity dead zone — if hand barely moved, freeze target completely
+        if self._prev_target is not None:
+            delta = math.sqrt(
+                (target_x - self._prev_target[0])**2 +
+                (target_y - self._prev_target[1])**2 +
+                (target_z - self._prev_target[2])**2)
+            if delta < VEL_DEAD:
+                target_x, target_y, target_z = self._prev_target
+        self._prev_target = [target_x, target_y, target_z]
+
+        # Snap assist
         if self.gripper < 0.6 and self.held_cube is None:
-            best_dist = 0.18  # snap radius
+            best_dist = 0.18
             best_cube_pos = None
             for cube in self.cubes:
                 if cube['held'] or cube['placed']:
@@ -524,7 +548,6 @@ class JointBridgeNode(Node):
                     best_dist = d
                     best_cube_pos = cube['pos']
             if best_cube_pos is not None:
-                # Gentle magnetic pull toward cube center (20% bias)
                 snap_strength = 0.20
                 target_x += (best_cube_pos[0] - target_x) * snap_strength
                 target_y += (best_cube_pos[1] - target_y) * snap_strength
@@ -533,9 +556,10 @@ class JointBridgeNode(Node):
         w_p, w_y = self.wrist_orientation
         fw_pitch, fw_yaw = self.pose_filter.filter_orientation(0.0, w_p, w_y)[1:]
 
+        # Fix 4: More IK iterations (5 → 8) for better accuracy
         joints = inverse_kinematics(
             target_x, target_y, target_z,
-            fw_pitch, fw_yaw, iterations=5)
+            fw_pitch, fw_yaw, iterations=8)
 
         pi = math.pi
         joints[0] = max(-pi,   min(pi,   joints[0]))
@@ -545,7 +569,14 @@ class JointBridgeNode(Node):
         joints[4] = max(-pi,   min(pi/2, joints[4]))
         joints[5] = max(-pi,   min(pi,   joints[5]))
 
-        self.joint_interp.set_target(joints)
+        # Fix 3: Joint-level EMA — smooths out IK discontinuities
+        if self._joint_ema is None:
+            self._joint_ema = list(joints)
+        else:
+            for i in range(6):
+                self._joint_ema[i] += JOINT_EMA * (joints[i] - self._joint_ema[i])
+
+        self.joint_interp.set_target(self._joint_ema)
         self.joint_positions = self.joint_interp.step()
         self.target_xyz = [target_x, target_y, target_z]
 
