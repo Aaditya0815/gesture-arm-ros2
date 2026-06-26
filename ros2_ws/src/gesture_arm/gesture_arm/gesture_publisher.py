@@ -38,7 +38,7 @@ L2        = 0.3922
 MAX_REACH = L1 + L2 - 0.05   # 0.762 ? safe max, avoids full-extension singularity
 MIN_REACH = 0.15              # Comfortable minimum ? avoids fully-folded singularity
 
-PICK_DISTANCE  = 0.12
+PICK_DISTANCE  = 0.15    # v14: 0.12 -> 0.15 for more forgiving grabs
 PLACE_DISTANCE = 0.15
 CUBE_SIZE      = 0.05
 
@@ -81,12 +81,12 @@ class OneEuroFilter:
 
 class PoseFilter:
     def __init__(self, freq=30.0):
-        # Forward/back and vertical: responsive
-        self.fx  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.20)
-        self.fy  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.20)
-        self.fz  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.20)
-        # Lateral (left/right sweep): much smoother - low beta kills jitter
-        self.fx_lat = OneEuroFilter(freq, min_cutoff=0.30, beta=0.05)
+        # v14: Position axes — more responsive (higher min_cutoff, moderate beta)
+        self.fx  = OneEuroFilter(freq, min_cutoff=0.8, beta=0.15)
+        self.fy  = OneEuroFilter(freq, min_cutoff=0.8, beta=0.15)
+        self.fz  = OneEuroFilter(freq, min_cutoff=0.8, beta=0.15)
+        # Lateral (left/right sweep): smooth — low beta kills jitter
+        self.fx_lat = OneEuroFilter(freq, min_cutoff=0.35, beta=0.05)
         # Wrist orientation: moderate smoothing
         self.fr  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
         self.fp  = OneEuroFilter(freq, min_cutoff=0.5, beta=0.10)
@@ -327,8 +327,10 @@ class JointBridgeNode(Node):
         self._teleop_ref_ee   = None
 
         self.pose_filter  = PoseFilter(freq=30.0)
-        self.joint_interp = JointInterpolator(max_rate_rad_s=3.0, freq=30.0)
+        self.joint_interp = JointInterpolator(max_rate_rad_s=4.5, freq=30.0)  # v14: 3.0 -> 4.5 for faster response
         self.joint_interp.reset(self.joint_positions)
+
+        self._teleop_recal_timer = 0.0   # v14: re-calibration drift timer
 
         self._init_scene()
         self.get_logger().info('Scene ready (right side) | Awaiting tracker...')
@@ -422,6 +424,7 @@ class JointBridgeNode(Node):
 
         if   self.mode == 'TELEOP': self._teleop_step()
         elif self.mode == 'AUTO':   self._auto_step(dt)
+        elif self.mode == 'STOP':   self._stop_step()
 
         # Use TF for the gripper ball so it sits exactly on the URDF tool0 frame.
         # Fall back to FK while TF hasn't warmed up yet.
@@ -445,10 +448,32 @@ class JointBridgeNode(Node):
         self._publish_joint_states()
         self._publish_markers()
 
+    def _stop_step(self):
+        """v14: Smooth emergency stop — decelerate to zero, drop held cube."""
+        # Freeze joint interpolator at current position (smooth stop)
+        self.joint_interp.set_target(self.joint_positions)
+        self.joint_positions = self.joint_interp.step()
+
+        # Safety: release any held cube
+        if self.held_cube is not None:
+            cube = self.cubes[self.held_cube]
+            cube['held'] = False
+            self.get_logger().info(f'[E-STOP] Released {cube["label"]}')
+            self.held_cube = None
+
+        # Slowly open gripper
+        self.gripper = min(1.0, self.gripper + 0.05)
+
+        # Clear teleop references so re-entering TELEOP recalibrates
+        self._teleop_ref_hand = None
+        self._teleop_ref_ee   = None
+
     def _teleop_step(self):
-        SCALE_XZ = 1.5   # reach (forward/back) and height
-        SCALE_Y  = 2.8   # lateral sweep: wider range, more responsive feel
-        LAT_DEAD = 0.03  # deadzone (m) -- kills micro-tremors when hand is still
+        SCALE_XZ = 1.8   # v14: 1.5 -> 1.8 for more reach
+        SCALE_Y  = 3.0   # v14: 2.8 -> 3.0 for wider lateral sweep
+        LAT_DEAD = 0.02  # v14: 0.03 -> 0.02 less deadzone = more responsive
+        RECAL_INTERVAL = 5.0  # v14: seconds between re-calibration drifts
+        RECAL_RATE     = 0.02 # v14: how fast reference drifts (0 = never, 1 = instant)
 
         user_x, user_y, user_z = self.spatial_pos
 
@@ -458,12 +483,22 @@ class JointBridgeNode(Node):
         _, fy, fz = self.pose_filter.filter_position(user_x, user_y, user_z)
 
         if self._teleop_ref_hand is None:
-            self._teleop_ref_hand = (fx_lat, fy, fz)
+            self._teleop_ref_hand = [fx_lat, fy, fz]
             self._teleop_ref_ee   = list(self.ee_pos)
+            self._teleop_recal_timer = 0.0
             self.get_logger().info(
                 f'[TELEOP] Calibrated | '
                 f'hand=({fx_lat:.2f},{fy:.2f},{fz:.2f}) '
                 f'EE=({self.ee_pos[0]:.2f},{self.ee_pos[1]:.2f},{self.ee_pos[2]:.2f})')
+
+        # v14: Periodic re-calibration — gently drift reference to reduce accumulated offset
+        self._teleop_recal_timer += 0.033
+        if self._teleop_recal_timer >= RECAL_INTERVAL:
+            self._teleop_recal_timer = 0.0
+            # Gently move reference toward current hand position
+            self._teleop_ref_hand[0] += (fx_lat - self._teleop_ref_hand[0]) * RECAL_RATE
+            self._teleop_ref_hand[1] += (fy - self._teleop_ref_hand[1]) * RECAL_RATE
+            self._teleop_ref_hand[2] += (fz - self._teleop_ref_hand[2]) * RECAL_RATE
 
         # Lateral delta with deadzone
         dx_raw = fx_lat - self._teleop_ref_hand[0]
@@ -473,9 +508,27 @@ class JointBridgeNode(Node):
         dz = fz  - self._teleop_ref_hand[2]
 
         ref_x, ref_y, ref_z = self._teleop_ref_ee
-        target_x = max(-0.70, min(-0.10, ref_x - dz * SCALE_XZ))
-        target_y = max(-0.72, min( 0.72, ref_y - dx * SCALE_Y))
-        target_z = max( 0.05, min( 0.70, ref_z + dy * SCALE_XZ))
+        target_x = max(-0.75, min(-0.08, ref_x - dz * SCALE_XZ))   # v14: wider bounds
+        target_y = max(-0.78, min( 0.78, ref_y - dx * SCALE_Y))
+        target_z = max( 0.02, min( 0.75, ref_z + dy * SCALE_XZ))   # v14: lower floor
+
+        # v14: Snap assist — when gripper is closing near a cube, bias toward it
+        if self.gripper < 0.6 and self.held_cube is None:
+            best_dist = 0.18  # snap radius
+            best_cube_pos = None
+            for cube in self.cubes:
+                if cube['held'] or cube['placed']:
+                    continue
+                d = self._dist([target_x, target_y, target_z], cube['pos'])
+                if d < best_dist:
+                    best_dist = d
+                    best_cube_pos = cube['pos']
+            if best_cube_pos is not None:
+                # Gentle magnetic pull toward cube center (20% bias)
+                snap_strength = 0.20
+                target_x += (best_cube_pos[0] - target_x) * snap_strength
+                target_y += (best_cube_pos[1] - target_y) * snap_strength
+                target_z += (best_cube_pos[2] - target_z) * snap_strength
 
         w_p, w_y = self.wrist_orientation
         fw_pitch, fw_yaw = self.pose_filter.filter_orientation(0.0, w_p, w_y)[1:]
@@ -725,7 +778,7 @@ class JointBridgeNode(Node):
         bl.text = f'DROP BOX  {self.score}/{len(self.cubes)}'
         ma.markers.append(bl)
 
-        # Cubes
+        # Cubes (with v14 proximity glow)
         for i, cube in enumerate(self.cubes):
             m = self._mk('cubes', i, Marker.CUBE, stamp)
             m.pose.position.x = cube['pos'][0]
@@ -744,6 +797,26 @@ class JointBridgeNode(Node):
             cl.color.r, cl.color.g, cl.color.b = cube['color']
             cl.color.a = 0.9
             cl.text = cube['label'] + (' [OK]' if cube['placed'] else '')
+
+            # v14: Proximity glow ring — shows when EE is close enough to grab
+            if self.mode == 'TELEOP' and not cube['placed'] and not cube['held']:
+                dist_to_ee = self._dist(self.ee_pos, cube['pos'])
+                if dist_to_ee < 0.22:  # within approach range
+                    glow = self._mk('glow', i, Marker.CYLINDER, stamp)
+                    glow.pose.position.x = cube['pos'][0]
+                    glow.pose.position.y = cube['pos'][1]
+                    glow.pose.position.z = cube['pos'][2] - 0.01
+                    glow_size = 0.12 if dist_to_ee < PICK_DISTANCE else 0.08
+                    glow.scale.x = glow.scale.y = glow_size
+                    glow.scale.z = 0.005
+                    if dist_to_ee < PICK_DISTANCE:
+                        glow.color.r, glow.color.g, glow.color.b = 0.0, 1.0, 0.3
+                        cl.text = cube['label'] + ' [GRAB!]'
+                    else:
+                        glow.color.r, glow.color.g, glow.color.b = 1.0, 1.0, 0.2
+                    glow.color.a = 0.5
+                    ma.markers.append(glow)
+
             ma.markers.append(cl)
 
         # EE gripper sphere
@@ -761,6 +834,17 @@ class JointBridgeNode(Node):
             gr.color.r, gr.color.g, gr.color.b = 0.15, 1.0, 0.30
         gr.color.a = 0.85
         ma.markers.append(gr)
+
+        # v14: Target ghost sphere — shows where arm is TRYING to go in TELEOP
+        if self.mode == 'TELEOP':
+            ghost = self._mk('ghost', 0, Marker.SPHERE, stamp)
+            ghost.pose.position.x = self.target_xyz[0]
+            ghost.pose.position.y = self.target_xyz[1]
+            ghost.pose.position.z = self.target_xyz[2]
+            ghost.scale.x = ghost.scale.y = ghost.scale.z = 0.04
+            ghost.color.r, ghost.color.g, ghost.color.b = 0.3, 0.7, 1.0
+            ghost.color.a = 0.35
+            ma.markers.append(ghost)
 
         # Status HUD
         st = self._mk('status', 0, Marker.TEXT_VIEW_FACING, stamp)
