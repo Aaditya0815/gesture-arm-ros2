@@ -24,8 +24,9 @@ Jazzy (2024) should also work. Humble (2022) may require package version adjustm
 
 A real-time **gesture-controlled UR5e robotic arm simulation** built on ROS 2.
 
-- **TELEOP Mode** → Your hand controls the robot arm live via webcam
-- **AUTO Mode** → The arm autonomously picks up coloured cubes and sorts them into a box using Inverse Kinematics
+- **TELEOP Mode** → Your hand controls the robot arm live via webcam — with hysteresis mode locking, velocity dead zone, snap-assist picking, and a two-finger gripper
+- **AUTO Mode** → The arm autonomously picks up coloured cubes and sorts them into a box using Inverse Kinematics and a finite state machine
+- **STOP Mode** → Emergency halt; freezes the robot at its exact current position
 
 ---
 
@@ -94,20 +95,33 @@ python3 src/gesture_arm/gesture_arm/gesture_tracker.py
 
 ---
 
+## Control Guide
+
+| Gesture | Action |
+|---|---|
+| **Raise right hand** above shoulder | Enter **TELEOP** mode (locks in) |
+| **Move hand** in 3D space | Control robot arm position |
+| **Make a fist** | Close gripper (pick up cube) |
+| **Open hand** | Open gripper (release cube) |
+| **Raise left hand** above shoulder | **Emergency STOP** — arm freezes instantly |
+| **Drop right hand** well below shoulder | Exit TELEOP → return to **AUTO** |
+
+---
+
 ## Project Structure
 
 ```
-gesture_arm_submission/
+gesture-arm-ros2/
 ├── run_simulation.sh          ← One-click launcher (START HERE)
 ├── run_tracker.sh             ← Hand tracker launcher
 ├── README.md                  ← This file
-├── PRESENTATION_NOTES.md      ← Full technical documentation
+├── PROJECT_OVERVIEW.md        ← Technical deep-dive
 ├── ros2_ws/
 │   └── src/
 │       └── gesture_arm/
 │           ├── gesture_arm/
-│           │   ├── gesture_publisher.py   ← Robot brain (IK, AUTO mode, scene)
-│           │   └── gesture_tracker.py     ← Hand CV tracking (MediaPipe)
+│           │   ├── gesture_publisher.py   ← Robot brain (IK, scene, control)
+│           │   └── gesture_tracker.py     ← Hand tracking (MediaPipe + Pose)
 │           ├── launch/
 │           │   └── demo.launch.py         ← ROS 2 launch file
 │           ├── urdf/
@@ -123,13 +137,17 @@ gesture_arm_submission/
 | Concept | What it does in this project |
 |---|---|
 | **ROS 2** | Middleware connecting tracker → robot brain → RViz |
-| **Inverse Kinematics** | Calculates joint angles from desired 3D position |
-| **MediaPipe Hands** | Detects 21 hand landmarks from webcam in real-time |
+| **Inverse Kinematics** | Iterative solver (8 refinement passes) calculates joint angles from desired 3D position |
+| **MediaPipe Pose + Hands** | Detects body pose (mode switching) and 21 hand landmarks (control + gripper) |
+| **1€ Filter** | Adaptive low-pass filter — smooth when still, responsive when moving fast |
+| **Velocity Dead Zone** | Freezes arm completely when hand movement is below threshold — eliminates micro-jitter |
+| **Joint EMA** | Post-IK exponential moving average smooths out IK discontinuities |
+| **Hysteresis Mode Lock** | Once in TELEOP, requires deliberate exit gesture to prevent accidental mode switches |
+| **Snap Assist** | Magnetic pull toward nearest cube when gripping — makes picking intuitive |
 | **UDP Socket** | Low-latency channel from tracker to robot controller |
-| **State Machine** | AUTO mode logic: SCAN→PICK→CARRY→DROP→RESET |
+| **State Machine** | AUTO mode logic: SCAN→PICK→CARRY→DROP→HOME→repeat |
 | **Cosine Interpolation** | Smooth S-curve motion between joint positions |
 | **TF / robot_state_publisher** | Broadcasts live positions of all robot links |
-| **RViz2 Markers** | Renders cubes, box, table, and gripper ball |
 
 ---
 
