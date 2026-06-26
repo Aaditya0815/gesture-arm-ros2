@@ -107,14 +107,13 @@ def extract_wrist_orientation(hand_landmarks):
     yaw   = math.atan2( R[1, 0],  R[0, 0])
     roll  = math.atan2( R[2, 1],  R[2, 2])
 
-    # v12: wrist_roll now computed from yaw (was hardcoded 0 — j4 never moved!)
-    # v12: gains increased 0.6→1.5 / 0.5→1.5 for full wrist range
-    wrist_roll  = yaw   * 0.8                       # j4 — doorknob rotation
-    wrist_pitch = (-math.pi / 2) + pitch * 1.5      # j5 — palm tilt up/down
-    wrist_yaw   = (-math.pi / 2) + roll  * 1.5      # j6 — wrist side tilt
+    # v15: Tuned wrist gains — smoother, fuller range
+    wrist_roll  = yaw   * 1.0                       # j4 — doorknob rotation (was 0.8)
+    wrist_pitch = (-math.pi / 2) + pitch * 1.2      # j5 — palm tilt (was 1.5 — too jumpy)
+    wrist_yaw   = (-math.pi / 2) + roll  * 1.2      # j6 — wrist tilt (was 1.5)
 
     wrist_roll  = max(-math.pi,     min(math.pi,     wrist_roll))
-    wrist_pitch = max(-math.pi,     min(math.pi / 4, wrist_pitch))  # relaxed upper clamp
+    wrist_pitch = max(-math.pi,     min(math.pi / 4, wrist_pitch))
     wrist_yaw   = max(-math.pi,     min(math.pi,     wrist_yaw))
 
     return (wrist_roll, wrist_pitch, wrist_yaw)
